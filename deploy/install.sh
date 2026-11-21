@@ -13,7 +13,7 @@ set -euo pipefail
 
 HTTP_PORT="${HTTP_PORT:-8080}"
 HTTPS_PORT="${HTTPS_PORT:-8443}"
-APP_PORT="${APP_PORT:-3000}"
+APP_PORT="${APP_PORT:-3780}"   # port internal Node (cuma 127.0.0.1)
 APP_DIR=/opt/esp32-wol
 ETC_DIR=/etc/esp32-wol
 DATA_DIR=/var/lib/esp32-wol
@@ -30,6 +30,31 @@ die()  { printf '\033[1;31m[X]\033[0m %s\n' "$*"; exit 1; }
 HAS_SYSTEMD=0
 [ -d /run/systemd/system ] && HAS_SYSTEMD=1
 
+# ------------------------------------------------------------ cek port bentrok
+# port_owner 8080 -> nama proses yang listen (kosong = bebas)
+port_owner() {
+  ss -Htlnp 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {print $NF; exit}' | sed -n 's/.*(("\([^"]*\)".*/\1/p'
+}
+if [ "$HAS_SYSTEMD" -eq 1 ] && systemctl is-active -q esp32-wol 2>/dev/null; then
+  systemctl stop esp32-wol   # instalasi ulang: lepas port lama dulu
+fi
+own="$(port_owner "$APP_PORT")"
+if [ -n "$own" ]; then
+  for p in $(seq 3781 3799); do
+    if [ -z "$(port_owner "$p")" ]; then
+      warn "Port $APP_PORT dipakai '$own', server WoL pakai port internal $p"
+      APP_PORT="$p"; break
+    fi
+  done
+fi
+for p in "$HTTP_PORT" "$HTTPS_PORT"; do
+  own="$(port_owner "$p")"
+  if [ -n "$own" ] && [ "$own" != "nginx" ]; then
+    die "Port $p sudah dipakai '$own'. Pakai port lain: HTTP_PORT=.. HTTPS_PORT=.. (tool.py: --http-port/--https-port)"
+  fi
+done
+PORT80_OWNER="$(port_owner 80)"
+
 # ------------------------------------------------------------ paket
 node_ok() {
   command -v node >/dev/null 2>&1 || return 1
@@ -42,7 +67,14 @@ say "Install paket (nginx, openssl, node) ..."
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
+  if ! command -v nginx >/dev/null 2>&1 && [ -n "$PORT80_OWNER" ]; then
+    # port 80 dipakai '$PORT80_OWNER' -> cegah nginx auto-start (bakal gagal & bikin apt error)
+    printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
+    chmod +x /usr/sbin/policy-rc.d
+    trap 'rm -f /usr/sbin/policy-rc.d' EXIT
+  fi
   apt-get install -y -qq nginx openssl curl ca-certificates >/dev/null
+  rm -f /usr/sbin/policy-rc.d
   if ! node_ok; then
     apt-get install -y -qq nodejs >/dev/null 2>&1 || true
     if ! node_ok; then
@@ -131,7 +163,14 @@ fi
 say "Pasang config nginx (port $HTTP_PORT & $HTTPS_PORT) ..."
 sed -e "s/__HTTP_PORT__/$HTTP_PORT/g" -e "s/__HTTPS_PORT__/$HTTPS_PORT/g" \
   "$SRC/deploy/nginx-esp32-wol.conf" > /etc/nginx/conf.d/esp32-wol.conf
+if [ ! -f /proc/net/if_inet6 ]; then
+  sed -i '/listen \[::\]/d' /etc/nginx/conf.d/esp32-wol.conf   # IPv6 mati di VM
+fi
 sed -e "s/__APP_PORT__/$APP_PORT/g" "$SRC/deploy/nginx-esp32-wol-proxy.conf" > /etc/nginx/esp32-wol-proxy.conf
+if [ -n "$PORT80_OWNER" ] && [ "$PORT80_OWNER" != "nginx" ] && [ -e /etc/nginx/sites-enabled/default ]; then
+  warn "Port 80 dipakai '$PORT80_OWNER' -> matikan site default nginx (biar nginx tidak rebutan port 80)"
+  rm -f /etc/nginx/sites-enabled/default
+fi
 
 if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" = "Enforcing" ]; then
   say "SELinux: izinkan nginx proxy & port ..."
@@ -167,6 +206,19 @@ elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 
   say "firewalld: buka port $HTTP_PORT, $HTTPS_PORT"
   firewall-cmd -q --permanent --add-port="$HTTP_PORT/tcp" --add-port="$HTTPS_PORT/tcp"
   firewall-cmd -q --reload
+elif command -v iptables >/dev/null 2>&1 && iptables -S INPUT 2>/dev/null | grep -qE -- '-j (REJECT|DROP)|^-P INPUT DROP'; then
+  # contoh: image Ubuntu di Oracle Cloud -> iptables REJECT semua kecuali 22
+  say "iptables: buka port $HTTP_PORT, $HTTPS_PORT"
+  for p in "$HTTP_PORT" "$HTTPS_PORT"; do
+    iptables -C INPUT -p tcp --dport "$p" -j ACCEPT 2>/dev/null || iptables -I INPUT 1 -p tcp --dport "$p" -j ACCEPT
+  done
+  if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null 2>&1 || true
+  elif [ -d /etc/iptables ]; then
+    iptables-save > /etc/iptables/rules.v4
+  elif [ -f /etc/sysconfig/iptables ]; then
+    iptables-save > /etc/sysconfig/iptables
+  fi
 fi
 
 # ------------------------------------------------------------ cek

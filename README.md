@@ -24,7 +24,7 @@ Double-click `ESP32-WOL.bat`, atau `H:\python\python.exe tool.py <perintah>`:
 
 Contoh pindah ke server hosting:
 ```
-H:\python\python.exe tool.py config --server https://wol.domainmu.com --token <DEVICE_TOKEN> -y
+H:\python\python.exe tool.py config --server https://IP_VM:8443 --token <DEVICE_TOKEN> -y
 ```
 
 ## 2. Server (`server/`)
@@ -39,14 +39,32 @@ node server.js              # http://localhost:3000
 Env: `DEVICE_TOKEN` (sama dengan di `esp32/config.py`), `ADMIN_PASSWORD` (login dashboard),
 `PORT` (3000), `HOLD_MS` (20000), `DATA_FILE` (data.json).
 
-### Hosting
-Butuh server yang **jalan terus** (long-poll), contoh: VPS, Railway, Render, Fly.io, Koyeb.
-**Tidak bisa** di Vercel / Netlify / Cloudflare Workers (serverless).
+### Hosting di VM (nginx, akses langsung IP:port)
+Paling gampang, dari PC Windows (butuh SSH ke VM):
+```
+H:\python\python.exe tool.py deploy --host ubuntu@IP_VM
+```
+Ini upload `server/` + `deploy/` ke VM, jalankan `deploy/install.sh` (pasang nginx, Node,
+service systemd, sertifikat self-signed, buka firewall), lalu arahkan ESP32 ke VM.
 
-- **VPS**: `node server.js` pakai pm2/systemd + nginx/Caddy buat HTTPS.
-  Nginx: set `proxy_read_timeout 60s;` (long-poll 20 dtk).
-- **Docker**: `docker build -t wol server && docker run -d -p 3000:3000 --env-file server/.env -v wol:/data wol`
-- **Railway/Render**: root directory `server`, start command `node server.js`, isi env di dashboard.
+Atau manual di VM: copy folder `server/` + `deploy/`, lalu `sudo bash deploy/install.sh`.
+
+Hasilnya:
+| Akses | Keterangan |
+|---|---|
+| `http://IP_VM:8080`  | dashboard, tanpa enkripsi |
+| `https://IP_VM:8443` | dashboard, self-signed (browser kasih peringatan sekali). ESP32 pakai ini |
+
+Ganti port: `--http-port 9000 --https-port 9443` (atau env `HTTP_PORT`/`HTTPS_PORT` di install.sh).
+VM di cloud (AWS/GCP/Azure/dll): buka port tsb di Security Group panel provider.
+
+File di VM:
+- `/opt/esp32-wol/` kode server, `/etc/esp32-wol/wol.env` password & token
+- `/etc/nginx/conf.d/esp32-wol.conf` config nginx (template: `deploy/nginx-esp32-wol.conf`)
+- service `esp32-wol` -> `journalctl -u esp32-wol -f`, `systemctl restart esp32-wol`
+
+Update kode server: jalankan `tool.py deploy` lagi (password & data tetap).
+Tidak bisa di hosting serverless (Vercel/Netlify), karena butuh proses yang jalan terus.
 
 ### API
 | Endpoint | Auth | Fungsi |
@@ -59,7 +77,7 @@ Butuh server yang **jalan terus** (long-poll), contoh: VPS, Railway, Render, Fly
 Admin bisa pakai cookie atau header `Authorization: Bearer <ADMIN_PASSWORD>`, jadi bisa dibikin
 shortcut di HP:
 ```
-curl -X POST https://wol.domainmu.com/api/command -H "Authorization: Bearer PASSWORD" -H "Content-Type: application/json" -d "{\"type\":\"wake\"}"
+curl -k -X POST https://IP_VM:8443/api/command -H "Authorization: Bearer PASSWORD" -H "Content-Type: application/json" -d "{\"type\":\"wake\"}"
 ```
 
 ## Supaya PC bisa dibangunin
