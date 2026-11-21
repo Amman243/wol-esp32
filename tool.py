@@ -9,6 +9,7 @@ ESP32 Wake-on-LAN tool - flash MicroPython + upload kode ke ESP32 tanpa Arduino 
   python tool.py wake       -> suruh ESP32 kirim magic packet (tes dari PC)
   python tool.py ports      -> lihat daftar COM port
   python tool.py deploy --host user@IP_VM   -> install server+nginx di VM, arahkan ESP32
+  python tool.py bundle     -> bikin esp32-wol-vm.sh (1 file) buat deploy manual ke VM
 
 Opsi: --port COM3  --ssid X  --password Y  --mac AA:BB:..  --ip 192.168.0.108
 """
@@ -353,6 +354,52 @@ def deploy(args):
         upload(find_port(args.port))
 
 
+BUNDLE = os.path.join(ROOT, "esp32-wol-vm.sh")
+
+
+def make_bundle(args):
+    """Bikin 1 file installer .sh (server + nginx + service) buat dicopy manual ke VM."""
+    import base64, io, tarfile
+    token = args.token or read_config().get("DEVICE_TOKEN") or secrets.token_urlsafe(24)
+
+    def norm(ti):
+        ti.uid = ti.gid = 0
+        ti.uname = ti.gname = "root"
+        ti.mode = 0o755 if ti.isdir() or ti.name.endswith(".sh") else 0o644
+        return ti
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for rel in ("server/server.js", "server/package.json", "server/public", "deploy"):
+            tar.add(os.path.join(ROOT, rel), arcname=rel, filter=norm)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    b64 = "\n".join(b64[i:i + 76] for i in range(0, len(b64), 76))
+
+    script = """#!/usr/bin/env bash
+# ESP32 Wake-on-LAN - installer 1 file (server + dashboard + nginx + systemd)
+#
+# Di VM:  sudo bash esp32-wol-vm.sh
+#
+# Opsional: HTTP_PORT=8080 HTTPS_PORT=8443 ADMIN_PASSWORD=xxx sudo -E bash esp32-wol-vm.sh
+# Aman dijalankan ulang buat update (password & data tidak hilang).
+set -euo pipefail
+export DEVICE_TOKEN="${DEVICE_TOKEN:-%s}"
+[ "$(id -u)" -eq 0 ] || { echo "Jalankan pakai sudo/root: sudo bash $0"; exit 1; }
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+base64 -d > "$TMP/bundle.tgz" <<'__BUNDLE__'
+%s
+__BUNDLE__
+tar -xzf "$TMP/bundle.tgz" -C "$TMP"
+bash "$TMP/deploy/install.sh"
+""" % (token, b64)
+    with open(BUNDLE, "w", encoding="utf-8", newline="\n") as f:
+        f.write(script)
+    say("Installer dibuat: %s (%d KB)" % (BUNDLE, os.path.getsize(BUNDLE) // 1024))
+    say("DEVICE_TOKEN di dalamnya: " + token)
+    return token
+
+
 def wake_via_http():
     cfg = read_config()
     host = ask("IP / host ESP32", "%s.local" % cfg.get("HOSTNAME", "wol-esp32"))
@@ -367,7 +414,7 @@ def wake_via_http():
 # ------------------------------------------------------------------ main
 def main():
     ap = argparse.ArgumentParser(description="ESP32 Wake-on-LAN tool")
-    ap.add_argument("cmd", nargs="?", choices=["setup", "upload", "config", "monitor", "wake", "ports", "deploy"])
+    ap.add_argument("cmd", nargs="?", choices=["setup", "upload", "config", "monitor", "wake", "ports", "deploy", "bundle"])
     ap.add_argument("--port")
     ap.add_argument("--ssid")
     ap.add_argument("--password")
@@ -393,8 +440,9 @@ def main():
         say(" 5. Tes wake dari PC ini")
         say(" 6. Lihat COM port")
         say(" 7. Deploy server ke VM (ssh) + arahkan ESP32")
+        say(" 8. Bikin installer .sh buat deploy manual ke VM")
         cmd = {"1": "setup", "2": "upload", "3": "config", "4": "monitor",
-               "5": "wake", "6": "ports", "7": "deploy"}.get(input("Pilih: ").strip())
+               "5": "wake", "6": "ports", "7": "deploy", "8": "bundle"}.get(input("Pilih: ").strip())
         if not cmd:
             die("Pilihan tidak valid.")
 
@@ -424,6 +472,8 @@ def main():
         wake_via_http()
     elif cmd == "deploy":
         deploy(args)
+    elif cmd == "bundle":
+        make_bundle(args)
 
 
 if __name__ == "__main__":

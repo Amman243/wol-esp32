@@ -3,3 +3,4 @@ firmware/
 __pycache__/
 server/.env
 server/data.json
+esp32-wol-vm.sh
