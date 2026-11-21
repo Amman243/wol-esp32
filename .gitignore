@@ -1,0 +1,5 @@
+esp32/config.py
+firmware/
+__pycache__/
+server/.env
+server/data.json

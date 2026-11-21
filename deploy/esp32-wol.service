@@ -1,0 +1,22 @@
+[Unit]
+Description=ESP32 Wake-on-LAN server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wol
+Group=wol
+WorkingDirectory=/opt/esp32-wol
+EnvironmentFile=/etc/esp32-wol/wol.env
+ExecStart=__NODE__ /opt/esp32-wol/server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/esp32-wol
+
+[Install]
+WantedBy=multi-user.target
